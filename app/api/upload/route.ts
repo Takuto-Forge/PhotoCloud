@@ -25,8 +25,12 @@ export async function POST(request: Request) {
 
     // レスポンスに新しい名前も返してあげると親切
     return NextResponse.json({ url: signedUrl, filename: newFilename });
-  } catch (error) {
-    console.error(error);
-    return NextResponse.json({ error: "URLの発行に失敗したよ" }, { status: 500 });
+  } catch (error: any) {
+    console.error("Detailed Error:", error);
+    return NextResponse.json({ 
+      error: "URLの発行に失敗したよ",
+      message: error.message, // エラーメッセージを直接返す
+      stack: error.stack      // スタックトレースも返してみる
+    }, { status: 500 });
   }
 }

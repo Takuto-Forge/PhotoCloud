@@ -12,11 +12,11 @@ export async function GET() {
     const data = await r2.send(command);
     
     // ファイル名（Key）のリストを返すよ
-    const photos = data.Contents?.map(item => item.Key) || [];
+    // 取得したデータの Key を配列にして返す
+    const photos = data.Contents?.map(item => item.Key).filter(Boolean) || [];
+
     return NextResponse.json({ photos });
   } catch (error: any) {
-    // 💡 500エラーの「本当の理由」をログに出す！
-    console.error("R2 ERROR:", error); 
     return NextResponse.json({ 
       error: "一覧の取得に失敗したよ", 
       details: error.message 

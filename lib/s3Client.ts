@@ -11,16 +11,17 @@
 //   forcePathStyle: true,
 // });
 
+// lib/s3Client.ts の例
 import { S3Client } from "@aws-sdk/client-s3";
+
+const accountId = process.env.R2_ACCOUNT_ID;
 
 export const r2 = new S3Client({
   region: "auto",
-  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  // accountId が無いと undefined.r2... になってしまう
+  endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
   credentials: {
     accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
   },
-  // --- ここを追加 ---
-  // Edge RuntimeでXML解析や署名計算が正しく動くように調整
-  forcePathStyle: true,
 });

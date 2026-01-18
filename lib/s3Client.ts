@@ -20,8 +20,10 @@ export const r2 = new S3Client({
     accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
   },
-  forcePathStyle: true,
-  // ⚡️ Edge Runtimeで DOMParser エラーを回避するための必須設定
+  // お昼に解決した大事な設定！
+  forcePathStyle: true, 
+
+  // ⚡️ Cloudflareの本番環境（Edge）で DOMParser エラーを出さないための魔法
   requestHandler: {
     handle: (request: any) => {
       const url = `${request.protocol}//${request.hostname}${request.path}`;

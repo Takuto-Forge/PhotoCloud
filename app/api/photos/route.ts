@@ -2,6 +2,7 @@ export const runtime = "edge";
 
 import { NextResponse } from "next/server";
 import { AwsClient } from "aws4fetch";
+import { isGeneratedThumbnailKey } from "@/lib/thumbnails";
 
 const r2 = new AwsClient({
   accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
@@ -95,7 +96,13 @@ export async function GET() {
     } while (continuationToken);
 
     const sortedPhotos = photos
-      .filter((key) => key && !key.endsWith("/") && key !== "family_memo.txt")
+      .filter(
+        (key) =>
+          key &&
+          !key.endsWith("/") &&
+          key !== "family_memo.txt" &&
+          !isGeneratedThumbnailKey(key),
+      )
       .sort((left, right) => {
         const timestampDifference =
           getTimestampFromKey(right) - getTimestampFromKey(left);

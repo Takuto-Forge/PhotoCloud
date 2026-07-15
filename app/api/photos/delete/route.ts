@@ -26,11 +26,12 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({ message: "削除したよ！" });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const details = error instanceof Error ? error.message : "不明なエラー";
     console.error("Delete Error:", error);
     return NextResponse.json({ 
       error: "削除に失敗したよ",
-      details: error.message 
+      details,
     }, { status: 500 });
   }
 }

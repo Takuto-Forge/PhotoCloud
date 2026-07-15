@@ -1,7 +1,62 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { signOut } from "next-auth/react";
+
+const INITIAL_VISIBLE_ITEMS = 60;
+const ITEMS_PER_BATCH = 60;
+
+const getDisplayName = (folder: string) => {
+  if (folder === "root") return "すべて";
+  if (folder.startsWith("private_")) {
+    return folder.split("_").slice(2).join("_");
+  }
+  return folder;
+};
+
+const isVideo = (filename: string) => {
+  const videoExtensions = [".mp4", ".webm", ".ogg", ".mov"];
+  return videoExtensions.some((extension) =>
+    filename.toLowerCase().endsWith(extension),
+  );
+};
+
+const getFolders = (photoKeys: string[]) => {
+  const folderSet = new Set<string>(["root"]);
+
+  photoKeys.forEach((key) => {
+    if (key.includes("/")) {
+      folderSet.add(key.split("/")[0]);
+    }
+  });
+
+  return Array.from(folderSet).sort((left, right) => {
+    if (left === "root") return -1;
+    if (right === "root") return 1;
+    return getDisplayName(left).localeCompare(getDisplayName(right), "ja");
+  });
+};
+
+const getPublicFileUrl = (publicUrl: string, filename: string) => {
+  const baseUrl = publicUrl.replace(/\/$/, "");
+  const encodedFilename = filename.split("/").map(encodeURIComponent).join("/");
+  return `${baseUrl}/${encodedFilename}`;
+};
+
+const getThumbnailUrl = (
+  filename: string,
+  size: number,
+  fit: "cover" | "contain",
+  quality: number,
+) => {
+  const searchParams = new URLSearchParams({
+    key: filename,
+    size: String(size),
+    fit,
+    quality: String(quality),
+  });
+  return `/api/thumbnail?${searchParams.toString()}`;
+};
 
 export default function Home() {
   // ステートを単一のfileから配列(files)に変更
@@ -11,6 +66,8 @@ export default function Home() {
   const [uploadStatus, setUploadStatus] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_ITEMS);
   const [currentFolder, setCurrentFolder] = useState("root");
   const [folders, setFolders] = useState<string[]>(["root"]);
   const [newFolderName, setNewFolderName] = useState("");
@@ -32,23 +89,21 @@ export default function Home() {
   const [showNewPassword, setShowNewPassword] = useState(false); // 新規作成用
   const [showUnlockPassword, setShowUnlockPassword] = useState(false); // ロック解除用
 
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+
   const publicUrl = process.env.NEXT_PUBLIC_R2_PUBLIC_URL || "";
-
-  // --- フォルダ名の表示用ヘルパー ---
-  const getDisplayName = (folder: string) => {
-    if (folder === "root") return "すべて";
-    if (folder.startsWith("private_")) {
-      // private_パスワード_フォルダ名 の「フォルダ名」だけ抜粋
-      return folder.split("_").slice(2).join("_");
-    }
-    return folder;
-  };
-
-  // 判別用のヘルパー関数（コンポーネントの外か、中に配置してね）
-  const isVideo = (filename: string) => {
-    const videoExtensions = [".mp4", ".webm", ".ogg", ".mov"];
-    return videoExtensions.some(ext => filename.toLowerCase().endsWith(ext));
-  };
+  const filteredPhotos = useMemo(
+    () =>
+      photos.filter(
+        (photo) =>
+          currentFolder === "root" || photo.startsWith(`${currentFolder}/`),
+      ),
+    [currentFolder, photos],
+  );
+  const visiblePhotos = useMemo(
+    () => filteredPhotos.slice(0, visibleCount),
+    [filteredPhotos, visibleCount],
+  );
 
   // ★ 追加：一括削除の関数
   const handleBatchDelete = async () => {
@@ -66,39 +121,42 @@ export default function Home() {
       setSelectedFilesForDelete([]);
       setIsDeleteMode(false);
       fetchPhotos();
-    } catch (error) {
+    } catch {
       alert("一部消せなかったよ…");
     } finally {
       setDeleting(false);
     }
   };
 
-  const extractFolders = (photoKeys: string[]) => {
-    const folderSet = new Set<string>(["root"]);
-    photoKeys.forEach(key => {
-      if (key.includes("/")) {
-        folderSet.add(key.split("/")[0]);
-      }
-    });
-    setFolders(Array.from(folderSet));
-  };
-
-  const fetchPhotos = async () => {
+  const fetchPhotos = useCallback(async () => {
     setLoading(true);
-    const res = await fetch("/api/photos");
-    const data = await res.json();
-    if (data.photos) {
-      setPhotos(data.photos);
-      extractFolders(data.photos); // フォルダリストを更新
-    }
-    setLoading(false);
-  };
+    setLoadError("");
 
-  const fetchMemo = async () => {
+    try {
+      const res = await fetch("/api/photos", { cache: "no-store" });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.details || data.error || "写真一覧を取得できませんでした");
+      }
+
+      if (Array.isArray(data.photos)) {
+        setPhotos(data.photos);
+        setFolders(getFolders(data.photos));
+      }
+    } catch (error) {
+      console.error(error);
+      setLoadError("写真一覧を読み込めませんでした．もう一度お試しください．");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchMemo = useCallback(async () => {
     const res = await fetch("/api/memo");
     const data = await res.json();
     setMemo(data.memo || "");
-  };
+  }, []);
 
   const saveMemo = async () => {
     setSavingMemo(true);
@@ -111,9 +169,33 @@ export default function Home() {
   };
 
   useEffect(() => {
-    fetchPhotos();
-    fetchMemo();
-  }, []);
+    void fetchPhotos();
+    void fetchMemo();
+  }, [fetchMemo, fetchPhotos]);
+
+  useEffect(() => {
+    setVisibleCount(INITIAL_VISIBLE_ITEMS);
+  }, [currentFolder, photos]);
+
+  useEffect(() => {
+    const target = loadMoreRef.current;
+
+    if (!target || visibleCount >= filteredPhotos.length) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setVisibleCount((current) =>
+            Math.min(current + ITEMS_PER_BATCH, filteredPhotos.length),
+          );
+        }
+      },
+      { rootMargin: "600px" },
+    );
+
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [filteredPhotos.length, visibleCount]);
 
   const handleUpload = async () => {
     if (files.length === 0) return;
@@ -134,18 +216,30 @@ export default function Home() {
           }),
         });
         
-        const { url } = await res.json();
-        await fetch(url, { 
+        const uploadData = await res.json();
+
+        if (!res.ok || !uploadData.url) {
+          throw new Error(uploadData.message || "アップロードURLを取得できませんでした");
+        }
+
+        const uploadResponse = await fetch(uploadData.url, {
           method: "PUT", 
           body: currentFile, 
-          headers: { "Content-Type": currentFile.type } 
+          headers: {
+            "Content-Type":
+              uploadData.contentType || currentFile.type || "application/octet-stream",
+          },
         });
+
+        if (!uploadResponse.ok) {
+          throw new Error(`${currentFile.name}のアップロードに失敗しました`);
+        }
       }
       
       setFiles([]); // 終わったら空にする
       setUploadStatus("完了！");
       setTimeout(() => setUploadStatus(""), 3000); // 3秒後にメッセージを消す
-      fetchPhotos();
+      await fetchPhotos();
     } catch (error) {
       console.error(error);
       setUploadStatus("一部失敗しちゃったかも…");
@@ -162,7 +256,7 @@ export default function Home() {
         body: JSON.stringify({ filename }),
       });
       if (res.ok) fetchPhotos();
-    } catch (error) {
+    } catch {
       alert("消せなかったよ…");
     }
   };
@@ -360,7 +454,7 @@ export default function Home() {
             {/* まとめて削除バー */}
             <div className="mb-6 flex justify-between items-center">
               <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">
-                {photos.filter(photo => currentFolder === "root" || photo.startsWith(`${currentFolder}/`)).length} Items
+                {filteredPhotos.length} Items
               </p>
               <div className="flex gap-2">
                 {!isDeleteMode ? (
@@ -415,15 +509,25 @@ export default function Home() {
             </div>
 
             {/* ギャラリー表示 */}
+            {loadError && (
+              <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 p-4 text-center text-sm text-red-600 dark:border-red-900/40 dark:bg-red-950/20 dark:text-red-300">
+                <p>{loadError}</p>
+                <button
+                  type="button"
+                  onClick={() => void fetchPhotos()}
+                  className="mt-3 rounded-full bg-red-500 px-5 py-2 text-xs font-bold text-white transition hover:bg-red-600"
+                >
+                  再読み込み
+                </button>
+              </div>
+            )}
             <div className="grid grid-cols-3 gap-1 md:gap-4">
               {loading ? (
                 [...Array(9)].map((_, i) => (
                   <div key={i} className="aspect-square bg-gray-100 dark:bg-gray-900 animate-pulse rounded-lg" />
                 ))
               ) : (
-                photos
-                  .filter(photo => currentFolder === "root" || photo.startsWith(`${currentFolder}/`))
-                  .map((photo) => {
+                visiblePhotos.map((photo, index) => {
                     const isSelected = selectedFilesForDelete.includes(photo);
                     return (
                       <div 
@@ -442,14 +546,26 @@ export default function Home() {
                         }`}
                       >
                         {isVideo(photo) ? (
-                          <div className="relative w-full h-full">
-                            <video src={`${publicUrl}/${photo}`} className="w-full h-full object-cover" />
+                          <div className="relative flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-700 to-black">
                             <div className="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:bg-black/40 transition">
                               <PlayIcon />
                             </div>
+                            <span className="absolute bottom-2 left-2 right-2 truncate text-[9px] font-medium text-white/70">
+                              {photo.split("/").at(-1)}
+                            </span>
                           </div>
                         ) : (
-                          <img src={`${publicUrl}/${photo}`} alt="" className="w-full h-full object-cover" />
+                          <CloudImage
+                            publicUrl={publicUrl}
+                            filename={photo}
+                            size={480}
+                            fit="cover"
+                            quality={72}
+                            alt=""
+                            className="h-full w-full object-cover"
+                            loading={index < 12 ? "eager" : "lazy"}
+                            fetchPriority={index < 6 ? "high" : "low"}
+                          />
                         )}
                         
                         {isDeleteMode && (
@@ -464,6 +580,22 @@ export default function Home() {
                   })
               )}
             </div>
+
+            {!loading && visibleCount < filteredPhotos.length && (
+              <div ref={loadMoreRef} className="flex justify-center py-10">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setVisibleCount((current) =>
+                      Math.min(current + ITEMS_PER_BATCH, filteredPhotos.length),
+                    )
+                  }
+                  className="rounded-full border border-gray-200 bg-white px-6 py-2 text-xs font-bold text-gray-500 shadow-sm transition hover:border-gray-400 hover:text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-400"
+                >
+                  さらに表示（{visiblePhotos.length} / {filteredPhotos.length}）
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -473,9 +605,20 @@ export default function Home() {
             <div className="absolute inset-0" onClick={() => setSelectedPhoto(null)} />
             <div className="relative max-w-full max-h-full flex flex-col items-center animate-in zoom-in-95 duration-300">
               {isVideo(selectedPhoto) ? (
-                <video src={`${publicUrl}/${selectedPhoto}`} controls autoPlay className="max-w-full max-h-[80vh] rounded-lg shadow-2xl" />
+                <video src={getPublicFileUrl(publicUrl, selectedPhoto)} controls autoPlay preload="metadata" className="max-w-full max-h-[80vh] rounded-lg shadow-2xl" />
               ) : (
-                <img src={`${publicUrl}/${selectedPhoto}`} className="max-w-full max-h-[80vh] object-contain rounded-lg shadow-2xl" alt="拡大" />
+                <CloudImage
+                  key={selectedPhoto}
+                  publicUrl={publicUrl}
+                  filename={selectedPhoto}
+                  size={1600}
+                  fit="contain"
+                  quality={86}
+                  className="max-h-[80vh] max-w-full rounded-lg object-contain shadow-2xl"
+                  alt="拡大"
+                  loading="eager"
+                  fetchPriority="high"
+                />
               )}
               <div className="mt-8 flex gap-4">
                 <button onClick={() => setSelectedPhoto(null)} className="px-8 py-2 bg-white/10 text-white rounded-full hover:bg-white/20 transition backdrop-blur-md">閉じる</button>
@@ -491,6 +634,51 @@ export default function Home() {
         )}
       </div>
     </main>
+  );
+}
+
+type CloudImageProps = {
+  publicUrl: string;
+  filename: string;
+  size: number;
+  fit: "cover" | "contain";
+  quality: number;
+  className: string;
+  alt: string;
+  loading: "eager" | "lazy";
+  fetchPriority: "high" | "low" | "auto";
+};
+
+function CloudImage({
+  publicUrl,
+  filename,
+  size,
+  fit,
+  quality,
+  className,
+  alt,
+  loading,
+  fetchPriority,
+}: CloudImageProps) {
+  const [useOriginal, setUseOriginal] = useState(false);
+  const originalUrl = getPublicFileUrl(publicUrl, filename);
+  const thumbnailUrl = getThumbnailUrl(filename, size, fit, quality);
+
+  return (
+    // Cloudflare Image Transformationsで最適化するため，next/imageではなく通常のimgを使う．
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={useOriginal ? originalUrl : thumbnailUrl}
+      alt={alt}
+      className={className}
+      loading={loading}
+      decoding="async"
+      fetchPriority={fetchPriority}
+      draggable={false}
+      onError={() => {
+        if (!useOriginal) setUseOriginal(true);
+      }}
+    />
   );
 }
 

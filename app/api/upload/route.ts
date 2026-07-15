@@ -45,9 +45,29 @@ const r2 = new AwsClient({
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
 });
 
+function getContentType(filename: string, contentType?: string) {
+  if (contentType) return contentType;
+
+  const extension = filename.split(".").pop()?.toLowerCase();
+  const contentTypes: Record<string, string> = {
+    heic: "image/heic",
+    heif: "image/heif",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+    gif: "image/gif",
+    mov: "video/quicktime",
+    mp4: "video/mp4",
+  };
+
+  return (extension && contentTypes[extension]) || "application/octet-stream";
+}
+
 export async function POST(request: Request) {
   try {
     const { filename, contentType, folder } = await request.json();
+    const normalizedContentType = getContentType(filename, contentType);
     
     // 1. ファイル名の加工ロジック（たっくんの元のロジックをそのまま活かすね！）
     const now = new Date();
@@ -68,7 +88,7 @@ export async function POST(request: Request) {
     const signedRequest = await r2.sign(url.toString(), {
       method: 'PUT',
       headers: {
-        'Content-Type': contentType,
+        'Content-Type': normalizedContentType,
       },
       // 有効期限を60秒に設定
       aws: { signQuery: true, allHeaders: true },
@@ -78,13 +98,18 @@ export async function POST(request: Request) {
     const signedUrl = signedRequest.url;
 
     // フロントエンドに署名付きURLと新しいファイル名を返す
-    return NextResponse.json({ url: signedUrl, filename: newFilename });
+    return NextResponse.json({
+      url: signedUrl,
+      filename: newFilename,
+      contentType: normalizedContentType,
+    });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "不明なエラー";
     console.error("Upload Route Error:", error);
     return NextResponse.json({ 
       error: "URLの発行に失敗したよ",
-      message: error.message
+      message,
     }, { status: 500 });
   }
 }

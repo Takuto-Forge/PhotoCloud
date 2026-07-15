@@ -2,13 +2,55 @@
 
 家族専用の写真・動画バックアップ＆閲覧アプリです．Next.jsとCloudflare R2で動作します．
 
-## Cloudflareの画像最適化設定
+## 高速サムネイル構成
 
-写真一覧では，`/api/thumbnail` がCloudflare Image Transformationsを使って原本から軽量なAVIF／WebPサムネイルを生成します．HEICもブラウザ向けの形式へ変換されます．
+写真一覧は，専用のCloudflare Workerが既存R2バケットから原本を読み取り，Cloudflare Images Bindingで固定サイズのWebPへ変換します．変換結果は専用の`photocloud-thumbnails` R2バケットへ保存されるため，HEICを含めて変換は原則1回だけです．原本と生成物を分けることで，写真一覧のR2走査件数も増やしません．
 
-本番公開前にCloudflare Dashboardの **Images → Transformations** から，PhotoCloudを配信しているZoneのTransformationsを有効にしてください．設定されていない場合は原本画像へ自動的にフォールバックします．
+- 一覧: 320 x 320，WebP，品質50
+- 拡大プレビュー: 最大1600 x 1600，WebP，品質82
+- 初期表示: 18枚
+- 追加表示: 18枚ずつ
 
-Cloudflare Images Freeでは月5,000件のユニークな変換まで利用できます．同じ画像・同じ設定の再表示は，その月の追加変換として数えられません．
+この構成ではZoneや独自ドメインのImage Transformationsを有効にする必要はありません．WorkerにR2 BindingとImages Bindingを設定します．
+
+### 1. Thumbnail Workerをデプロイ
+
+```bash
+cd thumbnail-worker
+npm install
+```
+
+`wrangler.jsonc`は，現在使用中の原本R2バケット`parfait-photocloud`へ設定済みです．Cloudflareへログインし，サムネイル専用バケットを作成してデプロイします．原本バケットを将来改名した場合だけ，この設定も変更してください．
+
+```bash
+npx wrangler login
+npx wrangler r2 bucket create photocloud-thumbnails
+npm run deploy
+npx wrangler secret put AUTH_SECRET --config wrangler.jsonc
+```
+
+`AUTH_SECRET`には十分に長いランダム値を設定し，同じ値を次のPages環境変数にも設定します．WorkerのURLはデプロイ結果に表示される`https://...workers.dev`です．
+
+### 2. Cloudflare Pagesの環境変数
+
+```text
+THUMBNAIL_WORKER_URL=https://photocloud-thumbnail-worker.<subdomain>.workers.dev
+THUMBNAIL_WORKER_SECRET=<WorkerのAUTH_SECRETと同じ値>
+```
+
+環境変数を保存したら，Pagesを再デプロイします．設定前は既存のサムネイル処理へ一時的にフォールバックするため，画像が突然消えることはありません．
+
+### 3. 既存写真のサムネイルを事前生成
+
+リポジトリのルートで次を一度実行します．1回10件ずつ処理し，R2のカーソルを使って最後まで継続します．すでに生成済みの画像は再変換されません．
+
+```bash
+THUMBNAIL_WORKER_URL="https://photocloud-thumbnail-worker.<subdomain>.workers.dev" \
+THUMBNAIL_WORKER_SECRET="<設定したAUTH_SECRET>" \
+npm run thumbnails:backfill
+```
+
+動作確認時はChrome DevToolsのNetworkで`/api/thumbnail`を選び，`Content-Type: image/webp`と`X-PhotoCloud-Thumbnail: MISS`または`HIT`を確認します．純粋な初回速度を測る場合は「キャッシュを無効化」を有効にして再読み込みします．
 
 ## Environment Variables
 
@@ -20,6 +62,8 @@ R2_ACCESS_KEY_ID=
 R2_SECRET_ACCESS_KEY=
 R2_BUCKET_NAME=
 NEXT_PUBLIC_R2_PUBLIC_URL=
+THUMBNAIL_WORKER_URL=
+THUMBNAIL_WORKER_SECRET=
 ```
 
 `NEXT_PUBLIC_R2_PUBLIC_URL`には，末尾のスラッシュを付けずにR2の公開URLまたはカスタムドメインを指定します．

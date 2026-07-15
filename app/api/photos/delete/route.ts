@@ -8,6 +8,30 @@ const r2 = new AwsClient({
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
 });
 
+async function deleteGeneratedThumbnails(filename: string) {
+  const workerUrl = process.env.THUMBNAIL_WORKER_URL?.replace(/\/$/, "");
+  const workerSecret = process.env.THUMBNAIL_WORKER_SECRET;
+
+  if (!workerUrl || !workerSecret) return false;
+
+  const url = new URL(workerUrl);
+  const basePath = url.pathname.replace(/\/$/, "");
+  url.pathname = `${basePath}/thumbnail`;
+  url.search = new URLSearchParams({ key: filename }).toString();
+
+  const response = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${workerSecret}` },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`生成済みサムネイルの削除に失敗しました: ${response.status}`);
+  }
+
+  return true;
+}
+
 export async function POST(request: Request) {
   try {
     const { filename } = await request.json();
@@ -25,7 +49,15 @@ export async function POST(request: Request) {
       throw new Error(`削除に失敗したよ: ${response.status} ${errorText}`);
     }
 
-    return NextResponse.json({ message: "削除したよ！" });
+    let thumbnailsDeleted = false;
+    try {
+      thumbnailsDeleted = await deleteGeneratedThumbnails(filename);
+    } catch (thumbnailError) {
+      // 原本の削除は成功しているため，孤立サムネイルの掃除失敗だけを記録する．
+      console.warn("Thumbnail Delete Error:", thumbnailError);
+    }
+
+    return NextResponse.json({ message: "削除したよ！", thumbnailsDeleted });
   } catch (error: unknown) {
     const details = error instanceof Error ? error.message : "不明なエラー";
     console.error("Delete Error:", error);

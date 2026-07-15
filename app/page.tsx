@@ -2,9 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { signOut } from "next-auth/react";
+import {
+  THUMBNAIL_CACHE_VERSION,
+  type ThumbnailVariant,
+} from "@/lib/thumbnails";
 
-const INITIAL_VISIBLE_ITEMS = 60;
-const ITEMS_PER_BATCH = 60;
+const INITIAL_VISIBLE_ITEMS = 18;
+const ITEMS_PER_BATCH = 18;
+const THUMBNAIL_WARMUP_CONCURRENCY = 3;
 
 const getDisplayName = (folder: string) => {
   if (folder === "root") return "すべて";
@@ -45,17 +50,26 @@ const getPublicFileUrl = (publicUrl: string, filename: string) => {
 
 const getThumbnailUrl = (
   filename: string,
-  size: number,
-  fit: "cover" | "contain",
-  quality: number,
+  variant: ThumbnailVariant,
 ) => {
   const searchParams = new URLSearchParams({
     key: filename,
-    size: String(size),
-    fit,
-    quality: String(quality),
+    variant,
+    v: THUMBNAIL_CACHE_VERSION,
   });
   return `/api/thumbnail?${searchParams.toString()}`;
+};
+
+const warmGalleryThumbnail = async (filename: string) => {
+  const response = await fetch("/api/thumbnail", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: filename, variant: "gallery" }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`${filename}のサムネイルを準備できませんでした`);
+  }
 };
 
 export default function Home() {
@@ -190,7 +204,7 @@ export default function Home() {
           );
         }
       },
-      { rootMargin: "600px" },
+      { rootMargin: "300px" },
     );
 
     observer.observe(target);
@@ -200,6 +214,7 @@ export default function Home() {
   const handleUpload = async () => {
     if (files.length === 0) return;
     setUploading(true);
+    const uploadedImageKeys: string[] = [];
     
     try {
       // 選択されたファイルの数だけループを回すよ
@@ -233,6 +248,34 @@ export default function Home() {
 
         if (!uploadResponse.ok) {
           throw new Error(`${currentFile.name}のアップロードに失敗しました`);
+        }
+
+        if (uploadData.filename && !isVideo(uploadData.filename)) {
+          uploadedImageKeys.push(uploadData.filename);
+        }
+      }
+
+      if (uploadedImageKeys.length > 0) {
+        setUploadStatus("一覧用画像を準備中...");
+
+        for (
+          let index = 0;
+          index < uploadedImageKeys.length;
+          index += THUMBNAIL_WARMUP_CONCURRENCY
+        ) {
+          const batch = uploadedImageKeys.slice(
+            index,
+            index + THUMBNAIL_WARMUP_CONCURRENCY,
+          );
+          const results = await Promise.allSettled(
+            batch.map(warmGalleryThumbnail),
+          );
+
+          for (const result of results) {
+            if (result.status === "rejected") {
+              console.warn(result.reason);
+            }
+          }
         }
       }
       
@@ -558,12 +601,10 @@ export default function Home() {
                           <CloudImage
                             publicUrl={publicUrl}
                             filename={photo}
-                            size={480}
-                            fit="cover"
-                            quality={72}
+                            variant="gallery"
                             alt=""
                             className="h-full w-full object-cover"
-                            loading={index < 12 ? "eager" : "lazy"}
+                            loading={index < 6 ? "eager" : "lazy"}
                             fetchPriority={index < 6 ? "high" : "low"}
                           />
                         )}
@@ -611,13 +652,12 @@ export default function Home() {
                   key={selectedPhoto}
                   publicUrl={publicUrl}
                   filename={selectedPhoto}
-                  size={1600}
-                  fit="contain"
-                  quality={86}
+                  variant="preview"
                   className="max-h-[80vh] max-w-full rounded-lg object-contain shadow-2xl"
                   alt="拡大"
                   loading="eager"
                   fetchPriority="high"
+                  allowOriginalFallback
                 />
               )}
               <div className="mt-8 flex gap-4">
@@ -640,32 +680,43 @@ export default function Home() {
 type CloudImageProps = {
   publicUrl: string;
   filename: string;
-  size: number;
-  fit: "cover" | "contain";
-  quality: number;
+  variant: ThumbnailVariant;
   className: string;
   alt: string;
   loading: "eager" | "lazy";
   fetchPriority: "high" | "low" | "auto";
+  allowOriginalFallback?: boolean;
 };
 
 function CloudImage({
   publicUrl,
   filename,
-  size,
-  fit,
-  quality,
+  variant,
   className,
   alt,
   loading,
   fetchPriority,
+  allowOriginalFallback = false,
 }: CloudImageProps) {
   const [useOriginal, setUseOriginal] = useState(false);
+  const [hasError, setHasError] = useState(false);
   const originalUrl = getPublicFileUrl(publicUrl, filename);
-  const thumbnailUrl = getThumbnailUrl(filename, size, fit, quality);
+  const thumbnailUrl = getThumbnailUrl(filename, variant);
+
+  if (hasError) {
+    return (
+      <div
+        className={`${className} flex items-center justify-center bg-gray-100 text-[10px] text-gray-400 dark:bg-gray-900 dark:text-gray-600`}
+        role="img"
+        aria-label={alt || "プレビューなし"}
+      >
+        プレビューなし
+      </div>
+    );
+  }
 
   return (
-    // Cloudflare Image Transformationsで最適化するため，next/imageではなく通常のimgを使う．
+    // 専用Workerが固定WebPを返すため，next/imageではなく通常のimgを使う．
     // eslint-disable-next-line @next/next/no-img-element
     <img
       src={useOriginal ? originalUrl : thumbnailUrl}
@@ -676,7 +727,12 @@ function CloudImage({
       fetchPriority={fetchPriority}
       draggable={false}
       onError={() => {
-        if (!useOriginal) setUseOriginal(true);
+        if (allowOriginalFallback && !useOriginal && publicUrl) {
+          setUseOriginal(true);
+          return;
+        }
+
+        setHasError(true);
       }}
     />
   );

@@ -18,10 +18,9 @@
 ```bash
 cd thumbnail-worker
 npm install
-cp wrangler.example.jsonc wrangler.jsonc
 ```
 
-`wrangler.jsonc`の`replace-with-your-existing-r2-bucket-name`を，PhotoCloudが現在使っている原本R2バケット名へ置き換えます．その後，Cloudflareへログインし，サムネイル専用バケットを作成してデプロイします．
+`wrangler.jsonc`は，現在使用中の原本R2バケット`parfait-photocloud`へ設定済みです．Cloudflareへログインし，サムネイル専用バケットを作成してデプロイします．原本バケットを将来改名した場合だけ，この設定も変更してください．
 
 ```bash
 npx wrangler login

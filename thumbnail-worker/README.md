@@ -6,7 +6,7 @@
 
 | Binding | 種別 | 内容 |
 |---|---|---|
-| `PHOTOS` | R2 | PhotoCloudが使用中の原本バケット |
+| `PHOTOS` | R2 | 原本バケット`parfait-photocloud` |
 | `THUMBNAILS` | R2 | `photocloud-thumbnails`専用バケット |
 | `IMAGES` | Images | Cloudflare Images Binding |
 | `AUTH_SECRET` | Secret | Pages APIと共有するランダム値 |

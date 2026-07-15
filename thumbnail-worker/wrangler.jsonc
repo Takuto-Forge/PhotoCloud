@@ -10,7 +10,7 @@
   "r2_buckets": [
     {
       "binding": "PHOTOS",
-      "bucket_name": "replace-with-your-existing-r2-bucket-name"
+      "bucket_name": "parfait-photocloud"
     },
     {
       "binding": "THUMBNAILS",

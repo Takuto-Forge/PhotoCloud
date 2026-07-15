@@ -1,14 +1,26 @@
 import { auth } from "@/auth";
 
 export default auth((req) => {
-  // ログインしてなくて、かつ今ログインページにいない場合はログインへ飛ばす
-  if (!req.auth && req.nextUrl.pathname !== "/login") {
-    const newUrl = new URL("/login", req.nextUrl.origin);
-    return Response.redirect(newUrl);
+  if (req.auth) {
+    return;
+  }
+
+  const { pathname } = req.nextUrl;
+
+  // APIはログインページへ転送せず，呼び出し側が判定できる401を返す．
+  if (pathname.startsWith("/api/")) {
+    return Response.json(
+      { error: "ログインが必要です" },
+      { status: 401 },
+    );
+  }
+
+  if (pathname !== "/login") {
+    return Response.redirect(new URL("/login", req.nextUrl.origin));
   }
 });
 
 export const config = {
-  // 認証を適用する範囲（基本全部、ただし静的ファイルとかは除く）
-  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
+  // NextAuth自身のAPIと静的ファイル以外を認証対象にする．
+  matcher: ["/((?!api/auth|_next/static|_next/image|favicon.ico).*)"],
 };

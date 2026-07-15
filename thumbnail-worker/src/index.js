@@ -3,6 +3,12 @@ const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const DEFAULT_BACKFILL_LIMIT = 10;
 const MAX_BACKFILL_LIMIT = 25;
 const BACKFILL_CONCURRENCY = 3;
+const MAX_CONCURRENT_GENERATIONS = 2;
+const THUMBNAIL_RETRY_ATTEMPTS = 3;
+const THUMBNAIL_RETRY_BASE_DELAY_MS = 250;
+
+let activeGenerations = 0;
+const generationWaiters = [];
 
 const VARIANTS = {
   gallery: {
@@ -60,6 +66,55 @@ function getThumbnailKey(sourceKey, variant) {
   return `${THUMBNAIL_PREFIX}${variant}/${sourceKey}.webp`;
 }
 
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function withGenerationSlot(task) {
+  if (activeGenerations >= MAX_CONCURRENT_GENERATIONS) {
+    await new Promise((resolve) => generationWaiters.push(resolve));
+  } else {
+    activeGenerations += 1;
+  }
+
+  try {
+    return await task();
+  } finally {
+    const next = generationWaiters.shift();
+
+    if (next) next();
+    else activeGenerations -= 1;
+  }
+}
+
+function isRetryableError(error) {
+  if (!(error instanceof HttpError)) return true;
+  return error.status === 429 || error.status >= 500;
+}
+
+async function retryThumbnailTask(task) {
+  let lastError;
+
+  for (let attempt = 0; attempt < THUMBNAIL_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await task();
+    } catch (error) {
+      lastError = error;
+
+      if (
+        !isRetryableError(error) ||
+        attempt === THUMBNAIL_RETRY_ATTEMPTS - 1
+      ) {
+        throw error;
+      }
+
+      await delay(THUMBNAIL_RETRY_BASE_DELAY_MS * 2 ** attempt);
+    }
+  }
+
+  throw lastError;
+}
+
 function isSourceImageKey(key) {
   if (
     !key ||
@@ -115,53 +170,69 @@ async function ensureThumbnail(env, sourceKey, variant) {
     return { state: "HIT", object: cached };
   }
 
-  const source = await env.PHOTOS.get(sourceKey);
+  return withGenerationSlot(async () => {
+    // 同じ画像の要求が待機中に別リクエストで生成される場合があるため，再確認する．
+    const cachedAfterWaiting = await env.THUMBNAILS.get(thumbnailKey);
 
-  if (!source) {
-    throw new HttpError(404, "Source image not found");
-  }
+    if (cachedAfterWaiting) {
+      return { state: "HIT", object: cachedAfterWaiting };
+    }
 
-  if (source.size > MAX_IMAGE_BYTES) {
-    throw new HttpError(
-      413,
-      "Source image exceeds the 20 MB Images binding input limit",
-    );
-  }
+    const source = await env.PHOTOS.get(sourceKey);
 
-  const options = VARIANTS[variant];
-  const output = await env.IMAGES.input(source.body)
-    .transform({
-      width: options.width,
-      height: options.height,
-      fit: options.fit,
-    })
-    .output({
-      format: "image/webp",
-      quality: options.quality,
-      anim: false,
+    if (!source) {
+      throw new HttpError(404, "Source image not found");
+    }
+
+    if (source.size > MAX_IMAGE_BYTES) {
+      throw new HttpError(
+        413,
+        "Source image exceeds the 20 MB Images binding input limit",
+      );
+    }
+
+    const options = VARIANTS[variant];
+    const output = await env.IMAGES.input(source.body)
+      .transform({
+        width: options.width,
+        height: options.height,
+        fit: options.fit,
+      })
+      .output({
+        format: "image/webp",
+        quality: options.quality,
+        anim: false,
+      });
+    const transformed = output.response();
+
+    if (!transformed.ok) {
+      const errorStatus =
+        transformed.status === 429
+          ? 429
+          : transformed.status >= 400 && transformed.status < 500
+            ? 422
+            : 502;
+
+      throw new HttpError(
+        errorStatus,
+        `Cloudflare Images returned ${transformed.status}`,
+      );
+    }
+
+    const bytes = await transformed.arrayBuffer();
+    const storedObject = await env.THUMBNAILS.put(thumbnailKey, bytes, {
+      httpMetadata: {
+        contentType: "image/webp",
+        cacheControl: "private, max-age=31536000, immutable",
+      },
+      customMetadata: {
+        sourceEtag: source.etag,
+        variant,
+      },
     });
-  const transformed = output.response();
 
-  if (!transformed.ok) {
-    throw new HttpError(
-      502,
-      `Cloudflare Images returned ${transformed.status}`,
-    );
-  }
-
-  const bytes = await transformed.arrayBuffer();
-  const storedObject = await env.THUMBNAILS.put(thumbnailKey, bytes, {
-    httpMetadata: {
-      contentType: "image/webp",
-      cacheControl: "private, max-age=31536000, immutable",
-    },
-    customMetadata: {
-      sourceEtag: source.etag,
-      variant,
-    },
+    return { state: "MISS", bytes, storedObject };
   });
-
-  return { state: "MISS", bytes, storedObject };
 }
 
 async function handleGetThumbnail(url, env) {
@@ -172,7 +243,9 @@ async function handleGetThumbnail(url, env) {
     throw new HttpError(400, "A valid key and variant are required");
   }
 
-  const result = await ensureThumbnail(env, sourceKey, variant);
+  const result = await retryThumbnailTask(() =>
+    ensureThumbnail(env, sourceKey, variant),
+  );
   return result.object
     ? createCachedResponse(result.object, result.state)
     : createGeneratedResponse(result);
@@ -231,7 +304,9 @@ async function handleBackfill(request, env) {
 
   await mapWithConcurrency(sourceKeys, BACKFILL_CONCURRENCY, async (sourceKey) => {
     try {
-      const result = await ensureThumbnail(env, sourceKey, "gallery");
+      const result = await retryThumbnailTask(() =>
+        ensureThumbnail(env, sourceKey, "gallery"),
+      );
       if (result.state === "HIT") cached += 1;
       else generated += 1;
     } catch (error) {

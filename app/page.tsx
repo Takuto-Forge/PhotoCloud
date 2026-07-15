@@ -10,6 +10,66 @@ import {
 const INITIAL_VISIBLE_ITEMS = 18;
 const ITEMS_PER_BATCH = 18;
 const THUMBNAIL_WARMUP_CONCURRENCY = 3;
+const MAX_CONCURRENT_GALLERY_LOADS = 4;
+const MAX_THUMBNAIL_RETRIES = 3;
+
+type GalleryLoadEntry = {
+  cancelled: boolean;
+  started: boolean;
+  finish?: () => void;
+  start: (finish: () => void) => void;
+};
+
+const galleryLoadQueue: GalleryLoadEntry[] = [];
+let activeGalleryLoads = 0;
+
+function pumpGalleryLoadQueue() {
+  while (
+    activeGalleryLoads < MAX_CONCURRENT_GALLERY_LOADS &&
+    galleryLoadQueue.length > 0
+  ) {
+    const entry = galleryLoadQueue.shift();
+
+    if (!entry || entry.cancelled) continue;
+
+    activeGalleryLoads += 1;
+    entry.started = true;
+    let finished = false;
+
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      activeGalleryLoads = Math.max(0, activeGalleryLoads - 1);
+      pumpGalleryLoadQueue();
+    };
+
+    entry.finish = finish;
+    entry.start(finish);
+  }
+}
+
+function scheduleGalleryLoad(start: GalleryLoadEntry["start"]) {
+  const entry: GalleryLoadEntry = {
+    cancelled: false,
+    started: false,
+    start,
+  };
+
+  galleryLoadQueue.push(entry);
+  pumpGalleryLoadQueue();
+
+  return () => {
+    entry.cancelled = true;
+
+    if (entry.started) {
+      entry.finish?.();
+      return;
+    }
+
+    const queueIndex = galleryLoadQueue.indexOf(entry);
+    if (queueIndex >= 0) galleryLoadQueue.splice(queueIndex, 1);
+  };
+}
 
 const getDisplayName = (folder: string) => {
   if (folder === "root") return "すべて";
@@ -700,8 +760,45 @@ function CloudImage({
 }: CloudImageProps) {
   const [useOriginal, setUseOriginal] = useState(false);
   const [hasError, setHasError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [canLoad, setCanLoad] = useState(variant === "preview");
+  const scheduledReleaseRef = useRef<(() => void) | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const originalUrl = getPublicFileUrl(publicUrl, filename);
   const thumbnailUrl = getThumbnailUrl(filename, variant);
+  const retryThumbnailUrl =
+    retryCount === 0 ? thumbnailUrl : `${thumbnailUrl}&retry=${retryCount}`;
+
+  useEffect(() => {
+    if (variant === "preview") return;
+
+    let scheduledRelease: (() => void) | undefined;
+    const cancel = scheduleGalleryLoad((finish) => {
+      scheduledRelease = finish;
+      scheduledReleaseRef.current = finish;
+      setCanLoad(true);
+    });
+
+    return () => {
+      cancel();
+      if (scheduledReleaseRef.current === scheduledRelease) {
+        scheduledReleaseRef.current = null;
+      }
+    };
+  }, [filename, retryCount, variant]);
+
+  useEffect(
+    () => () => {
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+    },
+    [],
+  );
+
+  const finishScheduledLoad = () => {
+    scheduledReleaseRef.current?.();
+    scheduledReleaseRef.current = null;
+  };
 
   if (hasError) {
     return (
@@ -715,18 +812,46 @@ function CloudImage({
     );
   }
 
+  if (!canLoad || isRetrying) {
+    return (
+      <div
+        className={`${className} animate-pulse bg-gray-100 dark:bg-gray-900`}
+        aria-hidden="true"
+      />
+    );
+  }
+
   return (
     // 専用Workerが固定WebPを返すため，next/imageではなく通常のimgを使う．
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src={useOriginal ? originalUrl : thumbnailUrl}
+      src={useOriginal ? originalUrl : retryThumbnailUrl}
       alt={alt}
       className={className}
-      loading={loading}
+      loading={variant === "gallery" ? "eager" : loading}
       decoding="async"
       fetchPriority={fetchPriority}
       draggable={false}
+      onLoad={finishScheduledLoad}
       onError={() => {
+        finishScheduledLoad();
+
+        if (!useOriginal && retryCount < MAX_THUMBNAIL_RETRIES) {
+          if (retryTimerRef.current) return;
+
+          setIsRetrying(true);
+          retryTimerRef.current = setTimeout(
+            () => {
+              retryTimerRef.current = null;
+              if (variant === "gallery") setCanLoad(false);
+              setRetryCount((current) => current + 1);
+              setIsRetrying(false);
+            },
+            400 * 2 ** retryCount,
+          );
+          return;
+        }
+
         if (allowOriginalFallback && !useOriginal && publicUrl) {
           setUseOriginal(true);
           return;

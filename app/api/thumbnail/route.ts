@@ -27,6 +27,10 @@ const LEGACY_VARIANTS: Record<
   preview: { size: 1600, fit: "contain", quality: 82 },
 };
 
+const WORKER_RETRY_ATTEMPTS = 2;
+const WORKER_RETRY_BASE_DELAY_MS = 200;
+const RETRYABLE_WORKER_STATUSES = new Set([429, 500, 502, 503, 504]);
+
 function getOutputFormat(acceptHeader: string) {
   if (acceptHeader.includes("image/avif")) return "avif" as const;
   if (acceptHeader.includes("image/webp")) return "webp" as const;
@@ -74,10 +78,39 @@ async function fetchWorkerThumbnail(
   variant: ThumbnailVariant,
   config: NonNullable<ReturnType<typeof getWorkerConfig>>,
 ) {
-  return fetch(
-    createWorkerRequest(config.workerUrl, config.workerSecret, key, variant),
-    { cache: "no-store" },
-  );
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < WORKER_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(
+        createWorkerRequest(config.workerUrl, config.workerSecret, key, variant),
+        { cache: "no-store" },
+      );
+
+      if (
+        !RETRYABLE_WORKER_STATUSES.has(response.status) ||
+        attempt === WORKER_RETRY_ATTEMPTS - 1
+      ) {
+        return response;
+      }
+
+      await response.body?.cancel().catch(() => undefined);
+    } catch (error) {
+      lastError = error;
+
+      if (attempt === WORKER_RETRY_ATTEMPTS - 1) {
+        throw error;
+      }
+    }
+
+    await new Promise((resolve) =>
+      setTimeout(resolve, WORKER_RETRY_BASE_DELAY_MS * 2 ** attempt),
+    );
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Thumbnail Workerへの接続に失敗しました");
 }
 
 async function fetchLegacyThumbnail(

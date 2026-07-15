@@ -94,6 +94,60 @@ class MockImages {
   }
 }
 
+class FlakyImages extends MockImages {
+  constructor(failures) {
+    super();
+    this.failures = failures;
+  }
+
+  input() {
+    this.calls += 1;
+    const currentCall = this.calls;
+
+    return {
+      transform: (transformOptions) => ({
+        output: async (outputOptions) => ({
+          response: () =>
+            currentCall <= this.failures
+              ? new Response("temporarily unavailable", { status: 503 })
+              : new Response(
+                  `thumbnail:${transformOptions.width}:${outputOptions.quality}`,
+                  { headers: { "Content-Type": outputOptions.format } },
+                ),
+        }),
+      }),
+    };
+  }
+}
+
+class DelayedImages extends MockImages {
+  active = 0;
+  maxActive = 0;
+
+  input() {
+    this.calls += 1;
+
+    return {
+      transform: (transformOptions) => ({
+        output: async (outputOptions) => {
+          this.active += 1;
+          this.maxActive = Math.max(this.maxActive, this.active);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          this.active -= 1;
+
+          return {
+            response: () =>
+              new Response(
+                `thumbnail:${transformOptions.width}:${outputOptions.quality}`,
+                { headers: { "Content-Type": outputOptions.format } },
+              ),
+          };
+        },
+      }),
+    };
+  }
+}
+
 function createEnv(photoEntries = [], thumbnailEntries = []) {
   return {
     PHOTOS: new MockBucket(photoEntries),
@@ -158,6 +212,41 @@ test("serves an existing thumbnail without transforming again", async () => {
   assert.equal(response.headers.get("X-PhotoCloud-Thumbnail"), "HIT");
   assert.equal(await response.text(), "cached-thumbnail");
   assert.equal(env.IMAGES.calls, 0);
+});
+
+test("retries a transient Images failure before returning the thumbnail", async () => {
+  const env = createEnv([["photo.jpg", "original"]]);
+  env.IMAGES = new FlakyImages(2);
+  const response = await worker.fetch(
+    createRequest("/thumbnail?key=photo.jpg&variant=gallery"),
+    env,
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("X-PhotoCloud-Thumbnail"), "MISS");
+  assert.equal(env.IMAGES.calls, 3);
+});
+
+test("limits concurrent first-time thumbnail generations", async () => {
+  const entries = Array.from({ length: 6 }, (_, index) => [
+    `photo-${index}.jpg`,
+    `original-${index}`,
+  ]);
+  const env = createEnv(entries);
+  env.IMAGES = new DelayedImages();
+
+  const responses = await Promise.all(
+    entries.map(([key]) =>
+      worker.fetch(
+        createRequest(`/thumbnail?key=${encodeURIComponent(key)}&variant=gallery`),
+        env,
+      ),
+    ),
+  );
+
+  assert.ok(responses.every((response) => response.status === 200));
+  assert.equal(env.IMAGES.calls, entries.length);
+  assert.ok(env.IMAGES.maxActive <= 2);
 });
 
 test("deletes every generated variant for an original", async () => {
